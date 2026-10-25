@@ -30,6 +30,14 @@ function load() {
   return { days: {}, custom: [] };
 }
 
+// Compare data without caring about key order
+const stable = (o) =>
+  JSON.stringify(o, (k, v) =>
+    v && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : 1)))
+      : v
+  );
+
 // Merge cloud data and this device's data. The newest change wins.
 function pick(a, b) {
   if (!a) return b;
@@ -63,10 +71,17 @@ function Tracker({ userId }) {
   const key = fmt(cur);
   const isToday = key === today;
 
-  // 1) On login: load from the cloud and merge with this device
+  // 1) Load from the cloud, then keep listening for changes from other devices
   useEffect(() => {
     let live = true;
-    (async () => {
+
+    const apply = (cloud) =>
+      setData((local) => {
+        const m = merge(cloud, local);
+        return stable(m) === stable(local) ? local : m; // no change = no re-save
+      });
+
+    const pull = async () => {
       const { data: row, error } = await supabase
         .from("tracker")
         .select("data")
@@ -77,15 +92,38 @@ function Tracker({ userId }) {
         setStatus("Could not load: " + error.message);
         return; // do not enable saving, so cloud data is never overwritten
       }
-      if (row?.data?.days) {
-        const cloud = { days: row.data.days || {}, custom: row.data.custom || [] };
-        setData((local) => merge(cloud, local));
-      }
-      setSynced(true);
-      setStatus("Connected to cloud ✓");
-    })();
+      if (row?.data?.days) apply({ days: row.data.days || {}, custom: row.data.custom || [] });
+      setSynced((was) => {
+        if (!was) setStatus("Connected to cloud ✓");
+        return true;
+      });
+    };
+
+    pull();
+
+    // Live updates pushed from the cloud
+    const channel = supabase
+      .channel("tracker-" + userId)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "tracker", filter: `user_id=eq.${userId}` },
+        (payload) => {
+          const d = payload.new?.data;
+          if (d?.days) apply({ days: d.days || {}, custom: d.custom || [] });
+        }
+      )
+      .subscribe();
+
+    // Catch up when you come back to the app
+    const onVisible = () => {
+      if (document.visibilityState === "visible") pull();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+
     return () => {
       live = false;
+      document.removeEventListener("visibilitychange", onVisible);
+      supabase.removeChannel(channel);
     };
   }, [userId]);
 
