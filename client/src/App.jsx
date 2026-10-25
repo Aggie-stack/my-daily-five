@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { supabase } from "./supabase.js";
+import Auth from "./Auth.jsx";
 
 const BASE = [
   { id: "book", name: "Read today’s law", sub: "The Diary of a CEO · 32 laws", ph: "In one line: how will I use it today?" },
@@ -28,7 +30,7 @@ function load() {
   return { days: {}, custom: [] };
 }
 
-export default function App() {
+function Tracker({ userId }) {
   const [data, setData] = useState(load);
   const [cur, setCur] = useState(new Date());
   const [newHabit, setNewHabit] = useState("");
@@ -37,11 +39,35 @@ export default function App() {
   const key = fmt(cur);
   const isToday = key === today;
 
+  const [synced, setSynced] = useState(false);
+
+  // 1) On login: load saved data from the cloud
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      const { data: row } = await supabase
+        .from("tracker")
+        .select("data")
+        .eq("user_id", userId)
+        .maybeSingle();
+      if (!live) return;
+      if (row?.data?.days) setData({ days: row.data.days, custom: row.data.custom || [] });
+      setSynced(true);
+    })();
+    return () => { live = false; };
+  }, [userId]);
+
+  // 2) On every change: keep a local copy and save to the cloud
   useEffect(() => {
     try {
       localStorage.setItem(KEY, JSON.stringify(data));
     } catch (e) {}
-  }, [data]);
+    if (!synced) return;
+    const t = setTimeout(() => {
+      supabase.from("tracker").upsert({ user_id: userId, data, updated_at: new Date().toISOString() });
+    }, 800);
+    return () => clearTimeout(t);
+  }, [data, synced, userId]);
 
   const habits = useMemo(
     () =>
@@ -188,6 +214,9 @@ export default function App() {
         />
         <button aria-label="Add habit" onClick={addHabit}>+</button>
       </div>
+      <p className="signout">
+        <button className="link" onClick={() => supabase.auth.signOut()}>Sign out</button>
+      </p>
     </main>
   );
 }
@@ -238,4 +267,18 @@ function WeekSummary({ habits, entry, data, today }) {
       </p>
     </div>
   );
+}
+
+export default function App() {
+  const [session, setSession] = useState(undefined);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  if (session === undefined) return <main><p>Loading…</p></main>;
+  if (!session) return <Auth />;
+  return <Tracker userId={session.user.id} />;
 }
