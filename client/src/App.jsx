@@ -30,15 +30,21 @@ function load() {
   return { days: {}, custom: [] };
 }
 
-// Merge cloud data and this device's data so nothing is lost.
+// Merge cloud data and this device's data. The newest change wins.
+function pick(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  const ta = a.t || 0, tb = b.t || 0;
+  if (ta !== tb) return ta > tb ? a : b;
+  return { ...a, ...b, done: !!(a.done || b.done), note: b.note || a.note || "" };
+}
+
 function merge(cloud, local) {
   const days = { ...cloud.days };
   for (const k in local.days) {
     days[k] = { ...(days[k] || {}) };
     for (const h in local.days[k]) {
-      const a = days[k][h] || {};
-      const b = local.days[k][h] || {};
-      days[k][h] = { ...a, ...b, done: !!(a.done || b.done), note: b.note || a.note || "" };
+      days[k][h] = pick(days[k][h], local.days[k][h]);
     }
   }
   const ids = new Set(cloud.custom.map((c) => c.id));
@@ -120,7 +126,7 @@ function Tracker({ userId }) {
       ...d,
       days: {
         ...d.days,
-        [key]: { ...d.days[key], [h]: { ...d.days[key]?.[h], ...patch } },
+        [key]: { ...d.days[key], [h]: { ...d.days[key]?.[h], ...patch, t: Date.now() } },
       },
     }));
 
