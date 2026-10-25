@@ -30,31 +30,57 @@ function load() {
   return { days: {}, custom: [] };
 }
 
+// Merge cloud data and this device's data so nothing is lost.
+function merge(cloud, local) {
+  const days = { ...cloud.days };
+  for (const k in local.days) {
+    days[k] = { ...(days[k] || {}) };
+    for (const h in local.days[k]) {
+      const a = days[k][h] || {};
+      const b = local.days[k][h] || {};
+      days[k][h] = { ...a, ...b, done: !!(a.done || b.done), note: b.note || a.note || "" };
+    }
+  }
+  const ids = new Set(cloud.custom.map((c) => c.id));
+  const custom = [...cloud.custom, ...local.custom.filter((c) => !ids.has(c.id))];
+  return { days, custom };
+}
+
 function Tracker({ userId }) {
   const [data, setData] = useState(load);
   const [cur, setCur] = useState(new Date());
   const [newHabit, setNewHabit] = useState("");
   const [pending, setPending] = useState(null);
+  const [synced, setSynced] = useState(false);
+  const [status, setStatus] = useState("Connecting to cloud…");
   const today = fmt(new Date());
   const key = fmt(cur);
   const isToday = key === today;
 
-  const [synced, setSynced] = useState(false);
-
-  // 1) On login: load saved data from the cloud
+  // 1) On login: load from the cloud and merge with this device
   useEffect(() => {
     let live = true;
     (async () => {
-      const { data: row } = await supabase
+      const { data: row, error } = await supabase
         .from("tracker")
         .select("data")
         .eq("user_id", userId)
         .maybeSingle();
       if (!live) return;
-      if (row?.data?.days) setData({ days: row.data.days, custom: row.data.custom || [] });
+      if (error) {
+        setStatus("Could not load: " + error.message);
+        return; // do not enable saving, so cloud data is never overwritten
+      }
+      if (row?.data?.days) {
+        const cloud = { days: row.data.days || {}, custom: row.data.custom || [] };
+        setData((local) => merge(cloud, local));
+      }
       setSynced(true);
+      setStatus("Connected to cloud ✓");
     })();
-    return () => { live = false; };
+    return () => {
+      live = false;
+    };
   }, [userId]);
 
   // 2) On every change: keep a local copy and save to the cloud
@@ -63,8 +89,12 @@ function Tracker({ userId }) {
       localStorage.setItem(KEY, JSON.stringify(data));
     } catch (e) {}
     if (!synced) return;
-    const t = setTimeout(() => {
-      supabase.from("tracker").upsert({ user_id: userId, data, updated_at: new Date().toISOString() });
+    setStatus("Saving…");
+    const t = setTimeout(async () => {
+      const { error } = await supabase
+        .from("tracker")
+        .upsert({ user_id: userId, data, updated_at: new Date().toISOString() });
+      setStatus(error ? "Not saved: " + error.message : "Saved to cloud ✓");
     }, 800);
     return () => clearTimeout(t);
   }, [data, synced, userId]);
@@ -129,6 +159,8 @@ function Tracker({ userId }) {
     setPending(null);
     setData((d) => ({ ...d, custom: d.custom.filter((c) => c.id !== id) }));
   };
+
+  const isError = status.startsWith("Not saved") || status.startsWith("Could not");
 
   return (
     <main>
@@ -214,7 +246,10 @@ function Tracker({ userId }) {
         />
         <button aria-label="Add habit" onClick={addHabit}>+</button>
       </div>
+
       <p className="signout">
+        <span style={{ color: isError ? "#d64545" : undefined }}>{status}</span>
+        <br />
         <button className="link" onClick={() => supabase.auth.signOut()}>Sign out</button>
       </p>
     </main>
